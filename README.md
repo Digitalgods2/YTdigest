@@ -7,7 +7,8 @@ YT Digest is a Python script that monitors a YouTube channel, fetches transcript
 ## Features
 
 - **RSS Feed Monitoring** — Polls a YouTube channel's RSS feed for recent videos
-- **Smart Video Filtering** — Skips Shorts, clips under 30 min, and videos over 3 hours
+- **Smart Video Filtering** — Skips Shorts and clips under 30 min; no upper duration limit
+- **Self-Installing** — On first run, copies itself into `%APPDATA%\YTDigest` so everything lives in one place
 - **Transcript Retrieval** — Fetches auto-generated or manual transcripts via YouTube's API
 - **AI-Powered Highlights** — Sends transcripts to Google Gemini 2.5 Flash for top-5 highlights
 - **SQLite Storage** — Stores titles, dates, transcripts, and summaries permanently
@@ -35,37 +36,36 @@ OpenClaw (Cron) → yt_digest.py
 git clone https://github.com/Digitalgods2/YTdigest.git
 ```
 
-### 2. Install dependencies
+### 2. Run it
 
 ```bash
-pip install -r requirements_ytdigest.txt
-```
-
-Or let the script auto-install them on first run.
-
-### 3. Configure
-
-On first run, a default `config.ini` is created at `%APPDATA%\YTDigest\config.ini`. Edit it with your settings:
-
-```ini
-[ytdigest]
-youtube_channel_id = YOUR_CHANNEL_ID
-gemini_api_key = YOUR_GEMINI_API_KEY
-gemini_model = gemini-2.5-flash
-db_retention_days =
-max_log_lines = 500
-```
-
-- **youtube_channel_id** — Find it with: `yt-dlp --print channel_id --playlist-items 1 "https://www.youtube.com/@ChannelHandle"`
-- **gemini_api_key** — Get one free at [Google AI Studio](https://aistudio.google.com)
-
-### 4. Run
-
-```bash
+cd YTdigest
 python yt_digest.py
 ```
 
-Or set up as a scheduled task in OpenClaw (Clawdbot) with cron: `*/15 6-18 * * *`
+That's it. The script handles everything automatically:
+
+1. **Installs dependencies** — auto-detects missing pip packages and installs them
+2. **Copies itself to AppData** — installs `yt_digest.py` and `requirements_ytdigest.txt` into `%APPDATA%\YTDigest\`
+3. **Prompts for setup** — asks for your YouTube Channel ID and Gemini API key, saves to `config.ini`
+4. **Starts processing** — fetches videos, transcripts, and generates highlights
+
+After the first run, everything lives in `%APPDATA%\YTDigest\` and the clone folder can be deleted.
+
+**Finding a Channel ID:**
+```bash
+yt-dlp --print channel_id --playlist-items 1 "https://www.youtube.com/@ChannelHandle"
+```
+
+**Getting a Gemini API key:** Sign up free at [Google AI Studio](https://aistudio.google.com)
+
+### 3. Schedule (optional)
+
+Set up as a scheduled task in OpenClaw (Clawdbot) with cron: `*/15 6-18 * * *`
+
+```
+Run the command: python "%APPDATA%\YTDigest\yt_digest.py"
+```
 
 ## File Layout
 
@@ -102,8 +102,7 @@ Videos are classified through a multi-step pipeline:
 |---|---|
 | Skip | Shorts (any detection method) |
 | Skip | Under 30 minutes |
-| Skip | Over 3 hours |
-| Process | 30 min – 3 hours |
+| Process | 30 minutes and up (no upper limit) |
 
 ## Dependencies
 
