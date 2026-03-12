@@ -210,9 +210,38 @@ def _write_config(config: configparser.ConfigParser):
         config.write(f)
 
 
+def _install_to_appdata():
+    """Copy the script and requirements into %APPDATA%\\YTDigest if not already there."""
+    import shutil
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+
+    script_src = Path(__file__).resolve()
+    script_dst = APP_DIR / script_src.name
+    req_src = script_src.parent / "requirements_ytdigest.txt"
+    req_dst = APP_DIR / "requirements_ytdigest.txt"
+
+    # Skip if already running from AppData
+    if script_src.parent.resolve() == APP_DIR.resolve():
+        return
+
+    # Copy script
+    if not script_dst.exists() or script_src.stat().st_mtime > script_dst.stat().st_mtime:
+        shutil.copy2(script_src, script_dst)
+        print(f"[SETUP] Installed {script_src.name} -> {APP_DIR}")
+
+    # Copy requirements
+    if req_src.exists():
+        if not req_dst.exists() or req_src.stat().st_mtime > req_dst.stat().st_mtime:
+            shutil.copy2(req_src, req_dst)
+            print(f"[SETUP] Installed requirements_ytdigest.txt -> {APP_DIR}")
+
+    print(f"[SETUP] App installed to: {APP_DIR}")
+    print(f"[SETUP] Future runs: python \"{script_dst}\"")
+
+
 def load_config() -> configparser.ConfigParser:
     """Load config from config.ini. On first run, prompt for required values."""
-    APP_DIR.mkdir(parents=True, exist_ok=True)
+    _install_to_appdata()
 
     config = configparser.ConfigParser()
     config["ytdigest"] = DEFAULTS
