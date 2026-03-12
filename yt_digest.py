@@ -165,7 +165,6 @@ LOOKBACK_DAYS = 3            # On first run, check videos from the last N days
 
 # Video filtering (durations in seconds)
 MIN_DURATION_SECS = 1800     # 30 minutes — skip anything shorter
-MAX_DURATION_SECS = 10800    # 3 hours — skip anything longer
 
 # ── Default Configuration ──────────────────────────────────────────────────
 DEFAULTS = {
@@ -177,22 +176,66 @@ DEFAULTS = {
 }
 
 
+def _prompt_for_config() -> dict:
+    """Interactive first-run setup: ask user for required settings."""
+    print()
+    print("=" * 60)
+    print("  YT Digest — First-Run Setup")
+    print("=" * 60)
+    print()
+    print("  You need a YouTube Channel ID and a Google Gemini API key.")
+    print("  Channel IDs start with 'UC' (24 characters).")
+    print("  Get a Gemini API key free at: https://aistudio.google.com")
+    print()
+
+    channel_id = input("  YouTube Channel ID: ").strip()
+    api_key = input("  Gemini API Key: ").strip()
+    print()
+
+    overrides = {}
+    if channel_id:
+        overrides["youtube_channel_id"] = channel_id
+    if api_key:
+        overrides["gemini_api_key"] = api_key
+
+    return overrides
+
+
+def _write_config(config: configparser.ConfigParser):
+    """Write config to disk."""
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        f.write("; YT Digest Configuration\n")
+        f.write("; Edit the values below. This file is located at:\n")
+        f.write(f";   {CONFIG_PATH}\n\n")
+        config.write(f)
+
+
 def load_config() -> configparser.ConfigParser:
-    """Load config from config.ini. Create a default file if it doesn't exist."""
+    """Load config from config.ini. On first run, prompt for required values."""
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
     config = configparser.ConfigParser()
     config["ytdigest"] = DEFAULTS
 
-    if CONFIG_PATH.exists():
+    first_run = not CONFIG_PATH.exists()
+
+    if not first_run:
         config.read(str(CONFIG_PATH), encoding="utf-8")
-    else:
-        # First run — write default config file for user to edit
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            f.write("; YT Digest Configuration\n")
-            f.write("; Edit the values below. This file is located at:\n")
-            f.write(f";   {CONFIG_PATH}\n\n")
-            config.write(f)
+
+    # Check if required values are still placeholders
+    needs_setup = (
+        config.get("ytdigest", "youtube_channel_id") == "REPLACE_WITH_CHANNEL_ID"
+        or config.get("ytdigest", "gemini_api_key") == "REPLACE_WITH_GEMINI_API_KEY"
+    )
+
+    if needs_setup and sys.stdin.isatty():
+        overrides = _prompt_for_config()
+        for key, value in overrides.items():
+            config.set("ytdigest", key, value)
+        _write_config(config)
+        print(f"[SETUP] Config saved to: {CONFIG_PATH}")
+    elif first_run:
+        _write_config(config)
         print(f"[SETUP] Default config created at: {CONFIG_PATH}")
         print("[SETUP] Please edit config.ini with your API key and channel ID.")
 
@@ -329,7 +372,7 @@ def is_short_by_url(entry) -> bool:
 
 def classify_video(entry, video_id: str) -> str:
     """
-    Classify a video as 'short', 'too_short', 'too_long', or 'eligible'.
+    Classify a video as 'short', 'too_short', or 'eligible'.
     Uses fast RSS-based checks first, then falls back to page metadata.
     """
     # Fast check 1: thumbnail pattern
@@ -350,8 +393,6 @@ def classify_video(entry, video_id: str) -> str:
         return "short"
     elif duration < MIN_DURATION_SECS:
         return "too_short"
-    elif duration > MAX_DURATION_SECS:
-        return "too_long"
     else:
         return "eligible"
 
@@ -373,7 +414,6 @@ def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     videos = []
     skipped_short = 0
     skipped_too_short = 0
-    skipped_too_long = 0
 
     for entry in feed.entries:
         # Parse the published date from the feed
@@ -396,10 +436,6 @@ def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
             skipped_too_short += 1
             log(f"  Skipping (under {MIN_DURATION_SECS // 60} min): \"{entry.title}\"")
             continue
-        elif classification == "too_long":
-            skipped_too_long += 1
-            log(f"  Skipping (over {MAX_DURATION_SECS // 3600} hrs): \"{entry.title}\"")
-            continue
 
         videos.append({
             "video_id": video_id,
@@ -413,8 +449,7 @@ def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     videos.sort(key=lambda v: v["pub_date"])
     log(f"Eligible videos: {len(videos)} "
         f"(skipped {skipped_short} shorts, "
-        f"{skipped_too_short} too short, "
-        f"{skipped_too_long} too long)")
+        f"{skipped_too_short} too short)")
     return videos
 
 
