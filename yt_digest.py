@@ -63,11 +63,20 @@ def check_dependencies():
         if req_file.exists():
             print(f"[SETUP] Missing or outdated packages detected. "
                   f"Installing from {req_file}...")
+            # Try standard pip install first, then with --break-system-packages
+            # for Debian/Ubuntu/RPi systems that enforce PEP 668
+            pip_base = [sys.executable, "-m", "pip", "install",
+                        "-r", str(req_file), "--quiet"]
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", str(req_file),
-                 "--quiet"],
-                capture_output=True, text=True
+                pip_base, capture_output=True, text=True
             )
+            if result.returncode != 0 and "externally-managed" in result.stderr:
+                print("[SETUP] Detected externally-managed environment. "
+                      "Retrying with --break-system-packages...")
+                result = subprocess.run(
+                    pip_base + ["--break-system-packages"],
+                    capture_output=True, text=True
+                )
             if result.returncode == 0:
                 print("[SETUP] Dependencies installed successfully.")
                 # Re-verify after install
