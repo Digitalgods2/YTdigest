@@ -158,6 +158,7 @@ CONFIG_PATH = APP_DIR / "config.ini"
 DB_PATH = APP_DIR / "ytdigest.db"
 LOG_PATH = APP_DIR / "ytdigest.log"
 LAST_API_CALL_FILE = APP_DIR / "last_api_call.txt"
+LOCK_FILE = APP_DIR / "ytdigest.lock"
 
 # Rate limiting
 MIN_API_INTERVAL_SECS = 600  # 10 minutes between API calls
@@ -675,8 +676,49 @@ def process_single_video(conn: sqlite3.Connection, video: dict) -> bool:
     return True
 
 
+def acquire_lock() -> bool:
+    """Try to acquire a file lock. Returns True if successful."""
+    try:
+        if LOCK_FILE.exists():
+            # Check if the PID in the lock file is still running
+            pid = int(LOCK_FILE.read_text(encoding="utf-8").strip())
+            try:
+                os.kill(pid, 0)  # signal 0 = check if process exists
+                return False     # process is alive, lock is held
+            except OSError:
+                pass             # process is dead, stale lock
+        LOCK_FILE.write_text(str(os.getpid()), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def release_lock():
+    """Release the file lock."""
+    try:
+        if LOCK_FILE.exists():
+            # Only remove if we own it
+            pid = int(LOCK_FILE.read_text(encoding="utf-8").strip())
+            if pid == os.getpid():
+                LOCK_FILE.unlink()
+    except Exception:
+        pass
+
+
 def main():
     init_dirs()
+
+    if not acquire_lock():
+        print("[SKIP] Another instance is already running. Exiting.")
+        sys.exit(0)
+
+    try:
+        _main()
+    finally:
+        release_lock()
+
+
+def _main():
     rotate_log()
 
     log("=" * 60)
