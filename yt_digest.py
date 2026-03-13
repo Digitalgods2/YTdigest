@@ -310,19 +310,22 @@ def init_db() -> sqlite3.Connection:
             title        TEXT,
             published    DATETIME,
             processed_at DATETIME,
+            status       TEXT DEFAULT 'done',
             summary      TEXT,
             transcript   TEXT
         )
     """)
     conn.commit()
 
-    # Migrate older schema if summary/transcript columns are missing
+    # Migrate older schema if columns are missing
     cursor = conn.execute("PRAGMA table_info(processed_videos)")
     columns = {row[1] for row in cursor.fetchall()}
     if "transcript" not in columns:
         conn.execute("ALTER TABLE processed_videos ADD COLUMN transcript TEXT")
     if "summary" not in columns:
         conn.execute("ALTER TABLE processed_videos ADD COLUMN summary TEXT")
+    if "status" not in columns:
+        conn.execute("ALTER TABLE processed_videos ADD COLUMN status TEXT DEFAULT 'done'")
     conn.commit()
 
     return conn
@@ -341,10 +344,22 @@ def mark_processed(conn: sqlite3.Connection, video_id: str, title: str,
     """Record a video as processed with its transcript and summary."""
     conn.execute(
         """INSERT OR REPLACE INTO processed_videos
-           (video_id, title, published, processed_at, summary, transcript)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (video_id, title, published, processed_at, status, summary, transcript)
+           VALUES (?, ?, ?, ?, 'done', ?, ?)""",
         (video_id, title, published, datetime.now().isoformat(),
          summary, transcript),
+    )
+    conn.commit()
+
+
+def mark_skipped(conn: sqlite3.Connection, video_id: str, title: str,
+                 published: str, reason: str):
+    """Record a video as skipped so it won't be retried on future runs."""
+    conn.execute(
+        """INSERT OR IGNORE INTO processed_videos
+           (video_id, title, published, processed_at, status)
+           VALUES (?, ?, ?, ?, ?)""",
+        (video_id, title, published, datetime.now().isoformat(), reason),
     )
     conn.commit()
 
@@ -633,7 +648,9 @@ def process_single_video(conn: sqlite3.Connection, video: dict) -> bool:
     record_api_call_time()
 
     if not transcript:
-        log(f"Transcript not available for \"{video['title']}\". Skipping.")
+        log(f"Transcript not available for \"{video['title']}\". Marking as no_transcript.")
+        mark_skipped(conn, video_id, video["title"],
+                     video["published"], "no_transcript")
         return False
 
     log(f"Transcript retrieved: {len(transcript)} characters")
