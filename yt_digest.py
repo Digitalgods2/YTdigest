@@ -108,6 +108,11 @@ def check_dependencies():
 
 def _verify_all_installed() -> None:
     """Final verification that all packages are importable after install."""
+    # Clear the metadata cache so freshly-installed packages are visible
+    importlib.invalidate_caches()
+    if hasattr(importlib.metadata, "_cache"):
+        importlib.metadata._cache.clear()
+
     failures = []
     for pip_name, (import_name, min_version) in REQUIRED_PACKAGES.items():
         top_module = import_name.split(".")[0]
@@ -118,9 +123,12 @@ def _verify_all_installed() -> None:
             importlib.import_module(top_module)
         except ImportError:
             failures.append(pip_name)
+            continue
 
         try:
-            installed = importlib.metadata.version(pip_name)
+            # Re-read metadata fresh from disk
+            dist = importlib.metadata.Distribution.from_name(pip_name)
+            installed = dist.metadata["Version"]
             if _version_tuple(installed) < _version_tuple(min_version):
                 failures.append(f"{pip_name} (version {installed} < {min_version})")
         except importlib.metadata.PackageNotFoundError:
