@@ -432,6 +432,18 @@ def is_short_by_url(entry) -> bool:
     return "/shorts/" in link
 
 
+def classify_video_by_duration(video_id: str) -> str:
+    """Classify a video using only page metadata (for yt-dlp fallback entries)."""
+    duration = get_video_duration(video_id)
+    if duration is None:
+        return "eligible"
+    if duration <= 60:
+        return "short"
+    elif duration < MIN_DURATION_SECS:
+        return "too_short"
+    return "eligible"
+
+
 def classify_video(entry, video_id: str) -> str:
     """
     Classify a video as 'short', 'too_short', or 'eligible'.
@@ -459,8 +471,8 @@ def classify_video(entry, video_id: str) -> str:
         return "eligible"
 
 
-def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
-    """Fetch eligible videos (long livestreams/videos) from the last N days."""
+def _fetch_via_rss() -> list[dict]:
+    """Try to get video entries from the YouTube RSS feed."""
     feed_url = (
         f"https://www.youtube.com/feeds/videos.xml?channel_id={YOUTUBE_CHANNEL_ID}"
     )
@@ -468,43 +480,122 @@ def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     feed = feedparser.parse(feed_url)
 
     if not feed.entries:
-        log("No videos found in RSS feed.")
         return []
 
     from email.utils import parsedate_to_datetime
+    entries = []
+    for entry in feed.entries:
+        try:
+            pub_date = parsedate_to_datetime(entry.published)
+        except Exception:
+            pub_date = datetime.now(timezone.utc)
+        entries.append({
+            "video_id": entry.get("yt_videoid", entry.link.split("v=")[-1]),
+            "title": entry.title,
+            "link": entry.link,
+            "pub_date": pub_date,
+            "_entry": entry,  # keep for thumbnail/URL checks
+        })
+    return entries
+
+
+def _fetch_via_ytdlp() -> list[dict]:
+    """Fallback: use yt-dlp to discover recent videos when RSS is blocked."""
+    import json as _json
+    channel_url = f"https://www.youtube.com/channel/{YOUTUBE_CHANNEL_ID}/videos"
+    log("RSS feed unavailable. Trying yt-dlp fallback...")
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--flat-playlist", "--dump-json",
+             "--playlist-items", "1:15", channel_url],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            log(f"yt-dlp failed: {result.stderr.strip()}")
+            return []
+    except FileNotFoundError:
+        log("yt-dlp not installed. Install with: pip install yt-dlp")
+        return []
+    except subprocess.TimeoutExpired:
+        log("yt-dlp timed out.")
+        return []
+
+    entries = []
+    for line in result.stdout.strip().splitlines():
+        try:
+            data = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        video_id = data.get("id", "")
+        title = data.get("title", "")
+        # yt-dlp uses YYYYMMDD format for upload_date
+        upload_date = data.get("upload_date", "")
+        if upload_date and len(upload_date) == 8:
+            try:
+                pub_date = datetime(
+                    int(upload_date[:4]), int(upload_date[4:6]),
+                    int(upload_date[6:8]), tzinfo=timezone.utc
+                )
+            except ValueError:
+                pub_date = datetime.now(timezone.utc)
+        else:
+            pub_date = datetime.now(timezone.utc)
+
+        entries.append({
+            "video_id": video_id,
+            "title": title,
+            "link": f"https://www.youtube.com/watch?v={video_id}",
+            "pub_date": pub_date,
+            "_entry": None,
+        })
+
+    log(f"yt-dlp found {len(entries)} videos.")
+    return entries
+
+
+def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
+    """Fetch eligible videos from the last N days. Tries RSS, falls back to yt-dlp."""
+    # Try RSS first, fall back to yt-dlp
+    raw_entries = _fetch_via_rss()
+    if not raw_entries:
+        raw_entries = _fetch_via_ytdlp()
+    if not raw_entries:
+        log("No videos found from any source.")
+        return []
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     videos = []
     skipped_short = 0
     skipped_too_short = 0
 
-    for entry in feed.entries:
-        # Parse the published date from the feed
-        try:
-            pub_date = parsedate_to_datetime(entry.published)
-        except Exception:
-            pub_date = datetime.now(timezone.utc)
-
-        if pub_date < cutoff:
+    for item in raw_entries:
+        if item["pub_date"] < cutoff:
             continue
 
-        video_id = entry.get("yt_videoid", entry.link.split("v=")[-1])
-        classification = classify_video(entry, video_id)
+        video_id = item["video_id"]
+        entry = item.get("_entry")  # may be None for yt-dlp entries
+
+        # Classification: use RSS entry checks if available, else duration only
+        if entry is not None:
+            classification = classify_video(entry, video_id)
+        else:
+            classification = classify_video_by_duration(video_id)
 
         if classification == "short":
             skipped_short += 1
-            log(f"  Skipping Short: \"{entry.title}\"")
+            log(f"  Skipping Short: \"{item['title']}\"")
             continue
         elif classification == "too_short":
             skipped_too_short += 1
-            log(f"  Skipping (under {MIN_DURATION_SECS // 60} min): \"{entry.title}\"")
+            log(f"  Skipping (under {MIN_DURATION_SECS // 60} min): \"{item['title']}\"")
             continue
 
         videos.append({
             "video_id": video_id,
-            "title": entry.title,
-            "published": pub_date.isoformat(),
-            "link": entry.link,
-            "pub_date": pub_date,
+            "title": item["title"],
+            "published": item["pub_date"].isoformat(),
+            "link": item["link"],
+            "pub_date": item["pub_date"],
         })
 
     # Sort oldest first so we process in chronological order
