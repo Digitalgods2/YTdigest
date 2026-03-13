@@ -563,13 +563,24 @@ def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
         log("No videos found from any source.")
         return []
 
+    # Title patterns that indicate members-only or inaccessible content
+    SKIP_TITLE_PATTERNS = ["[member access]", "[members only]"]
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     videos = []
     skipped_short = 0
     skipped_too_short = 0
+    skipped_members = 0
 
     for item in raw_entries:
         if item["pub_date"] < cutoff:
+            continue
+
+        # Skip members-only videos by title
+        title_lower = item["title"].lower()
+        if any(pat in title_lower for pat in SKIP_TITLE_PATTERNS):
+            skipped_members += 1
+            log(f"  Skipping (members-only): \"{item['title']}\"")
             continue
 
         video_id = item["video_id"]
@@ -602,7 +613,8 @@ def get_recent_videos(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     videos.sort(key=lambda v: v["pub_date"])
     log(f"Eligible videos: {len(videos)} "
         f"(skipped {skipped_short} shorts, "
-        f"{skipped_too_short} too short)")
+        f"{skipped_too_short} too short, "
+        f"{skipped_members} members-only)")
     return videos
 
 
