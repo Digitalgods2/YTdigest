@@ -815,13 +815,9 @@ def process_single_video(conn: sqlite3.Connection, video: dict) -> bool:
 
     log(f"Transcript retrieved: {len(transcript)} characters")
 
-    # Enforce rate limit before Gemini call
-    enforce_rate_limit()
-
-    # Analyze with Gemini
+    # Analyze with Gemini (no rate limit — Gemini allows 15 req/min on free tier)
     try:
         highlights = analyze_with_gemini(transcript, video["title"])
-        record_api_call_time()
     except Exception as e:
         log(f"Gemini analysis failed: {e}")
         return False
@@ -890,9 +886,7 @@ def manual_summarize(video_id: str, transcript_path: str):
         log(f"Manual summary for \"{title}\" ({len(transcript)} characters)")
 
         # Analyze with Gemini
-        enforce_rate_limit()
         highlights = analyze_with_gemini(transcript, title)
-        record_api_call_time()
 
         mark_processed(conn, video_id, title, published, highlights, transcript)
         log(f"Successfully processed manual summary: \"{title}\"")

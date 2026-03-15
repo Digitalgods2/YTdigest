@@ -14,7 +14,7 @@ YT Digest is a Python script that monitors a YouTube channel, fetches transcript
 - **Transcript Retry** — Videos without transcripts are retried over 48 hours (9 attempts at 6-hour intervals) before giving up
 - **Manual Summary** — Import a Whisper (or other) transcript via `--summarize` to generate highlights for videos with no auto-transcript
 - **SQLite Storage** — Stores titles, dates, transcripts, and summaries permanently
-- **Rate Limiting** — 10-minute minimum between API calls, tracked persistently on disk
+- **Rate Limiting** — 10-minute minimum between transcript fetches, tracked persistently on disk (Gemini calls are not rate-limited)
 - **3-Day Lookback** — On first run (or after outage), catches up on recent videos chronologically
 - **Auto-Dependency Check** — Verifies and auto-installs pip packages on startup
 - **External Config** — All settings in `config.ini` (no hardcoded API keys)

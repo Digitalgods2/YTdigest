@@ -563,14 +563,15 @@ story.append(PageBreak())
 section("8. Rate Limiting")
 story.append(HR())
 
-body("To avoid hitting API quotas and to be a good API citizen, YT Digest "
-     "enforces a <b>10-minute minimum interval</b> between API calls.")
+body("To avoid hitting YouTube's API quotas, YT Digest enforces a "
+     "<b>10-minute minimum interval</b> between transcript fetch calls. "
+     "Gemini calls are not rate-limited (free tier allows 15 requests/minute).")
 
 sub("8.1 How It Works")
-bullet("After each API call (transcript fetch or Gemini analysis), the current "
-       "Unix timestamp is written to <b>last_api_call.txt</b>")
-bullet("Before the next API call, the script reads this file and calculates "
-       "elapsed time")
+bullet("After each transcript fetch, the current Unix timestamp is written to "
+       "<b>last_api_call.txt</b>")
+bullet("Before the next transcript fetch, the script reads this file and "
+       "calculates elapsed time")
 bullet("If less than 10 minutes have passed, the script <b>sleeps</b> for the "
        "remaining time")
 bullet("The timestamp file persists across runs &mdash; rate limiting works "
@@ -581,16 +582,16 @@ make_table(
     ["Event", "Rate Limit Applied"],
     [
         ["Transcript fetch", "Yes &mdash; waits if &lt; 10 min since last call"],
-        ["Gemini analysis", "Yes &mdash; waits if &lt; 10 min since last call"],
+        ["Gemini analysis", "No &mdash; Gemini free tier allows 15 req/min"],
         ["RSS feed fetch", "No &mdash; lightweight, no rate limit needed"],
         ["Video page fetch (duration)", "No &mdash; simple HTTP GET"],
     ],
     [2.5*inch, 4*inch],
 )
 spacer(0.1)
-note("When processing multiple videos, the total run time can be significant "
-     "(20+ minutes per video due to two rate-limited calls). This is by design "
-     "to respect API limits.")
+note("Each video requires one rate-limited call (transcript fetch) plus one "
+     "un-limited call (Gemini). Effective per-video time is ~10 minutes when "
+     "processing back-to-back.")
 
 story.append(PageBreak())
 

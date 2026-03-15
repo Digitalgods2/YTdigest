@@ -44,7 +44,7 @@ There are no tests or build steps. No linting configuration exists.
 
 ## Key Design Decisions
 
-- **Rate limiting**: 10-minute minimum between API calls, persisted to disk. Each video requires 2 rate-limited calls (transcript + Gemini), so effective per-video time is 20+ minutes.
+- **Rate limiting**: 10-minute minimum between transcript fetch calls, persisted to disk. Gemini calls are not rate-limited. Effective per-video time is ~10 minutes when processing back-to-back.
 - **Video filtering pipeline**: Shorts detected by thumbnail URL pattern (`hq2.jpg`), URL path (`/shorts/`), or duration ≤60s. Members-only detected by title patterns (`[member access]`, `[members only]`). Videos under 30 minutes are skipped.
 - **Transcript retry**: Videos without transcripts are marked `pending_transcript` and retried automatically (up to 9 attempts over ~48 hours at 6-hour cron intervals). After exhausting retries, status flips to `no_transcript`.
 - **Three statuses**: `done` (fully processed), `pending_transcript` (retrying), `no_transcript` (gave up — use `--summarize` for manual import).
