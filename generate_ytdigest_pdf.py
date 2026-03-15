@@ -176,7 +176,7 @@ subtitle("YouTube Transcript Analyzer &mdash; Installation &amp; Reference Guide
 spacer(0.3)
 story.append(HR())
 body(f"Document generated: {datetime.now().strftime('%B %d, %Y')}")
-body("Version: 3.0")
+body("Version: 4.0")
 body("Platform: Windows 11 / Python 3.13+")
 body("Execution: OpenClaw (Clawdbot) &mdash; Scheduled Task (Cron)")
 spacer(0.3)
@@ -205,10 +205,11 @@ toc_items = [
     "8. Rate Limiting",
     "9. Database Schema &amp; Storage",
     "10. Program Execution Flow",
-    "11. OpenClaw Scheduled Task Setup",
-    "12. Log File &amp; Housekeeping",
-    "13. Troubleshooting",
-    "14. Quick Reference Card",
+    "11. Transcript Retry &amp; Manual Summary",
+    "12. OpenClaw Scheduled Task Setup",
+    "13. Log File &amp; Housekeeping",
+    "14. Troubleshooting",
+    "15. Quick Reference Card",
 ]
 for item in toc_items:
     body(item)
@@ -223,13 +224,15 @@ body("YT Digest is a Python script designed to run as a background scheduled tas
      "via OpenClaw (Clawdbot). Each execution performs the following steps:")
 spacer(0.1)
 bullet("Fetches the YouTube channel's RSS feed and identifies recent videos")
-bullet("Filters out Shorts, videos under 30 minutes, and videos over 3 hours")
+bullet("Filters out Shorts, videos under 30 minutes, and members-only videos")
 bullet("On first run, looks back 3 days and processes videos chronologically")
 bullet("Checks if each video has already been processed (via SQLite lookup)")
 bullet("Fetches transcripts from YouTube when available")
+bullet("Retries videos without transcripts over 48 hours (9 attempts at 6-hour intervals)")
 bullet("Enforces 10-minute rate limiting between API calls (tracked on disk)")
 bullet("Sends transcripts to Google Gemini for top-5 highlights analysis")
 bullet("Stores the title, dates, transcript, and summary in a SQLite database")
+bullet("Supports manual transcript import via --summarize for videos with no auto-transcript")
 spacer(0.1)
 body("The script is idempotent &mdash; running it multiple times for the same video "
      "has no effect after the first successful processing. All configuration is "
@@ -383,7 +386,7 @@ body("File: requirements_ytdigest.txt")
 code("feedparser&gt;=6.0.0\n"
      "requests&gt;=2.25.0\n"
      "youtube-transcript-api&gt;=1.2.0\n"
-     "google-generativeai&gt;=0.8.0")
+     "google-genai&gt;=1.0.0")
 
 sub("5.2 Manual Installation")
 body("Open a terminal and run:")
@@ -415,7 +418,7 @@ make_table(
          "HTTP requests for fetching video page metadata (duration detection)"],
         ["youtube-transcript-api", "1.2.0",
          "Fetches auto-generated or manual transcripts from YouTube (no API key needed)"],
-        ["google-generativeai", "0.8.0",
+        ["google-genai", "1.0.0",
          "Google Gemini SDK for sending transcript to Gemini and receiving analysis"],
     ],
     [2*inch, 1*inch, 3.5*inch],
@@ -496,14 +499,16 @@ story.append(HR())
 
 body("Not every video on a channel is suitable for transcript analysis. "
      "YT Digest uses a multi-layered filtering pipeline to identify only "
-     "long-form content (30 minutes to 3 hours).")
+     "long-form content (30 minutes and up).")
 
 sub("7.1 Filter Pipeline")
 body("Each video from the RSS feed is classified in this order:")
 spacer(0.1)
 
 filter_mermaid = """flowchart TD
-    A["RSS Feed Entry"] --> B{"Thumbnail URL<br/>contains hq2.jpg?"}
+    A["RSS Feed Entry"] --> M{"Title contains<br/>[member access] or<br/>[members only]?"}
+    M -- Yes --> MEMBERS["SKIP: Members-Only"]
+    M -- No --> B{"Thumbnail URL<br/>contains hq2.jpg?"}
     B -- Yes --> SHORT["SKIP: Short"]
     B -- No --> C{"Link URL<br/>contains /shorts/?"}
     C -- Yes --> SHORT
@@ -514,13 +519,11 @@ filter_mermaid = """flowchart TD
     F -- Yes --> SHORT
     F -- No --> G{"&lt; 30 minutes?"}
     G -- Yes --> TOO_SHORT["SKIP: Too Short"]
-    G -- No --> H{"&gt; 3 hours?"}
-    H -- Yes --> TOO_LONG["SKIP: Too Long"]
-    H -- No --> ELIGIBLE
+    G -- No --> ELIGIBLE
 
     style SHORT fill:#ff6b6b,color:#fff
     style TOO_SHORT fill:#ffa94d,color:#fff
-    style TOO_LONG fill:#ffa94d,color:#fff
+    style MEMBERS fill:#ffa94d,color:#fff
     style ELIGIBLE fill:#51cf66,color:#fff
 """
 story.extend(render_mermaid(filter_mermaid, width=5.0 * inch,
@@ -530,13 +533,13 @@ sub("7.2 Classification Details")
 make_table(
     ["Classification", "Criteria", "Action"],
     [
+        ["members-only", "Title contains [member access] or [members only]",
+         "Skipped &mdash; no accessible transcript"],
         ["short", "hq2.jpg thumbnail, /shorts/ URL, or duration &le; 60s",
          "Skipped &mdash; not suitable for transcript analysis"],
         ["too_short", "Duration &lt; 30 minutes (1800 seconds)",
          "Skipped &mdash; below minimum length threshold"],
-        ["too_long", "Duration &gt; 3 hours (10800 seconds)",
-         "Skipped &mdash; above maximum length threshold"],
-        ["eligible", "Duration between 30 min and 3 hours, or duration unknown",
+        ["eligible", "Duration 30 min or longer, or duration unknown",
          "Processed &mdash; transcript fetched and analyzed"],
     ],
     [1.2*inch, 2.5*inch, 2.8*inch],
@@ -613,10 +616,14 @@ make_table(
          "Original publish date from YouTube RSS feed (ISO 8601 format)"],
         ["processed_at", "DATETIME",
          "Timestamp when YT Digest processed this video (ISO 8601 format)"],
+        ["status", "TEXT",
+         "done, pending_transcript, or no_transcript (see section 9.3)"],
         ["summary", "TEXT",
          "Gemini's top 5 highlights analysis (full text stored in DB)"],
         ["transcript", "TEXT",
          "Full transcript with timestamps, e.g., [01:23] Hello world"],
+        ["retry_count", "INTEGER",
+         "Number of transcript fetch attempts (used for pending_transcript retries)"],
     ],
     [1.3*inch, 1*inch, 4.2*inch],
 )
@@ -626,12 +633,27 @@ note("Summaries are stored directly in the database &mdash; no separate "
      "<b>processed_at</b> columns use DATETIME type for proper date sorting "
      "and comparison.")
 
-sub("9.3 Schema Migration")
-body("The script includes automatic schema migration. If the database was created "
-     "by an earlier version (before transcript/summary columns were added), "
-     "ALTER TABLE is run automatically. No manual intervention is needed.")
+sub("9.3 Video Statuses")
+body("Each video record has a status field that controls processing behavior:")
+make_table(
+    ["Status", "Meaning", "Behavior"],
+    [
+        ["done", "Transcript fetched and Gemini highlights generated",
+         "Skipped on future runs"],
+        ["pending_transcript", "No transcript available yet",
+         "Retried automatically every 6 hours (up to 9 attempts over ~48 hours)"],
+        ["no_transcript", "Gave up after 9 retry attempts",
+         "Permanently skipped. Use --summarize to manually import a transcript."],
+    ],
+    [1.5*inch, 2*inch, 3*inch],
+)
 
-sub("9.4 Querying the Database")
+sub("9.4 Schema Migration")
+body("The script includes automatic schema migration. If the database was created "
+     "by an earlier version (before transcript/summary/status/retry_count columns "
+     "were added), ALTER TABLE is run automatically. No manual intervention is needed.")
+
+sub("9.5 Querying the Database")
 body("You can inspect the database at any time using the sqlite3 CLI or any "
      "SQLite browser (e.g., DB Browser for SQLite):")
 code("sqlite3 \"%APPDATA%\\YTDigest\\ytdigest.db\"")
@@ -650,9 +672,15 @@ code("-- List all processed videos\n"
      "SELECT COUNT(*) FROM processed_videos;\n\n"
      "-- Videos processed in the last 7 days\n"
      "SELECT title, processed_at FROM processed_videos\n"
-     "WHERE processed_at &gt;= datetime('now', '-7 days');")
+     "WHERE processed_at &gt;= datetime('now', '-7 days');\n\n"
+     "-- Videos awaiting transcript\n"
+     "SELECT title, retry_count FROM processed_videos\n"
+     "WHERE status = 'pending_transcript';\n\n"
+     "-- Videos that gave up (candidates for --summarize)\n"
+     "SELECT video_id, title FROM processed_videos\n"
+     "WHERE status = 'no_transcript';")
 
-sub("9.5 Retention")
+sub("9.6 Retention")
 body("db_retention_days is set to empty (keep forever) by default. All records "
      "(transcripts, summaries, titles, dates) are kept permanently. To enable "
      "pruning, set db_retention_days in config.ini to the desired number of days.")
@@ -678,21 +706,27 @@ flow_mermaid = """flowchart TD
     RSS --> FILTER["Filter & Classify Videos"]
     FILTER --> LOOP{"More eligible<br/>videos?"}
     LOOP -- No --> HOUSEKEEP["Prune DB / Rotate Log"]
-    LOOP -- Yes --> DEDUP{"Already in DB?"}
+    LOOP -- Yes --> DEDUP{"Already done<br/>or no_transcript?"}
     DEDUP -- Yes --> LOOP
     DEDUP -- No --> RATE1["Enforce Rate Limit"]
     RATE1 --> TRANSCRIPT["Fetch Transcript"]
     TRANSCRIPT --> AVAIL{"Transcript<br/>available?"}
-    AVAIL -- No --> LOOP
+    AVAIL -- No --> PENDING["Mark pending_transcript<br/>(retry_count + 1)"]
+    PENDING --> MAXRETRY{"Retries<br/>&ge; 9?"}
+    MAXRETRY -- Yes --> GIVEUP["Mark no_transcript"]
+    MAXRETRY -- No --> LOOP
     AVAIL -- Yes --> RATE2["Enforce Rate Limit"]
     RATE2 --> GEMINI["Send to Gemini<br/>(Top 5 Highlights)"]
-    GEMINI --> STORE["Store in SQLite<br/>(title, dates, transcript, summary)"]
+    GEMINI --> STORE["Store in SQLite<br/>(status = done)"]
     STORE --> LOOP
+    GIVEUP --> LOOP
     HOUSEKEEP --> DONE(["Done"])
 
     style EXIT_ERR fill:#ff6b6b,color:#fff
     style DONE fill:#51cf66,color:#fff
     style START fill:#339af0,color:#fff
+    style PENDING fill:#ffa94d,color:#fff
+    style GIVEUP fill:#ff6b6b,color:#fff
 """
 story.extend(render_mermaid(flow_mermaid, width=4.5 * inch,
                             caption="Figure 3: Complete Execution Flow"))
@@ -702,8 +736,8 @@ spacer(0.2)
 sub("10.1 Exit Conditions (Normal)")
 body("The script exits cleanly (code 0) in these cases:")
 bullet("No eligible videos found in the lookback window")
-bullet("All eligible videos already processed")
-bullet("Transcript not yet available (will retry next cron run)")
+bullet("All eligible videos already processed (status = done or no_transcript)")
+bullet("Transcript not yet available &mdash; marked as pending_transcript for retry on next run")
 bullet("Successful processing complete")
 
 sub("10.2 Exit Conditions (Error)")
@@ -715,22 +749,71 @@ bullet("Dependency check failed and auto-install failed")
 story.append(PageBreak())
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 11. OPENCLAW SCHEDULED TASK
+# 11. TRANSCRIPT RETRY & MANUAL SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════
-section("11. OpenClaw Scheduled Task Setup")
+section("11. Transcript Retry &amp; Manual Summary")
 story.append(HR())
 
-sub("11.1 Overview")
+sub("11.1 Automatic Retry (pending_transcript)")
+body("YouTube can take up to 24 hours (or more) to generate auto-captions for a "
+     "newly uploaded video. When a video is discovered but has no transcript, "
+     "the script marks it as <b>pending_transcript</b> and retries on subsequent runs.")
+spacer(0.1)
+bullet("First run: video discovered, transcript fetch fails &rarr; status = pending_transcript, retry_count = 1")
+bullet("Every 6 hours: cron runs again, retries pending_transcript videos")
+bullet("After 9 attempts (~48 hours): status flips to <b>no_transcript</b> (gives up)")
+spacer(0.1)
+body("The retry_count column tracks how many attempts have been made. Videos with "
+     "status = pending_transcript are retried automatically &mdash; no user action needed.")
+
+sub("11.2 Manual Summary (--summarize)")
+body("If a video ends up as <b>no_transcript</b> (or if you have your own transcript "
+     "from Whisper or another tool), you can manually import it:")
+spacer(0.1)
+code("python yt_digest.py --summarize VIDEO_ID path\\to\\transcript.txt")
+spacer(0.1)
+body("This command:")
+bullet("Reads the transcript from the specified text file")
+bullet("Looks up the video's title and publish date from the existing DB record")
+bullet("Sends the transcript to Gemini for top-5 highlights analysis")
+bullet("Marks the video as <b>done</b> with the transcript and summary stored in the database")
+spacer(0.1)
+note("The --summarize command bypasses the instance lock and can be run at any time, "
+     "even while a cron job is active. Rate limiting still applies to the Gemini call.")
+
+sub("11.3 Example Workflow")
+body("Typical lifecycle for a video without auto-captions:")
+spacer(0.1)
+bullet("Run 1 (00:00): Video discovered, no transcript &rarr; pending_transcript (1/9)")
+bullet("Run 2 (06:00): Retry &rarr; still no transcript (2/9)")
+bullet("Run 3 (12:00): Retry &rarr; transcript appears! &rarr; Gemini analysis &rarr; done")
+spacer(0.1)
+body("Or, if transcripts never appear:")
+spacer(0.1)
+bullet("Runs 1-9 over 48 hours: all fail &rarr; status flips to no_transcript")
+bullet("User runs Whisper on the video and produces transcript.txt")
+bullet("User runs: python yt_digest.py --summarize VIDEO_ID transcript.txt")
+bullet("Video is now status = done with transcript and summary in the database")
+
+story.append(PageBreak())
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 12. OPENCLAW SCHEDULED TASK
+# ═══════════════════════════════════════════════════════════════════════════
+section("12. OpenClaw Scheduled Task Setup")
+story.append(HR())
+
+sub("12.1 Overview")
 body("The script is executed by OpenClaw (Clawdbot) as a scheduled task (cron job). "
      "OpenClaw has its own built-in scheduler &mdash; it does NOT use Windows Task "
      "Scheduler. The Desktop app must be running for tasks to fire.")
 
-sub("11.2 Creating the Scheduled Task")
+sub("12.2 Creating the Scheduled Task")
 body("In OpenClaw Desktop:")
 bullet("Open the Desktop app")
 bullet("Navigate to the Schedule feature")
 bullet("Create a new scheduled task named <b>\"yt-digest\"</b>")
-bullet("Set the schedule to run every 15 minutes between 6 AM and 7 PM ET")
+bullet("Set the schedule to run every 6 hours")
 bullet("Set the prompt/instruction to:")
 spacer(0.1)
 code("Run the command: python %APPDATA%\\YTDigest\\yt_digest.py")
@@ -738,25 +821,25 @@ spacer(0.1)
 body("Alternatively, the task is stored on disk and can be edited directly:")
 code("~/.claude/scheduled-tasks/yt-digest/SKILL.md")
 
-sub("11.3 Recommended Cron Schedule")
-body("For polling between 6 AM and 7 PM ET, every 15 minutes:")
-code("*/15 6-18 * * *")
+sub("12.3 Recommended Cron Schedule")
+body("Run every 6 hours to catch new videos and retry pending transcripts:")
+code("0 */6 * * *")
 spacer(0.1)
-body("This means: every 15 minutes, during hours 6 through 18 (6 AM &mdash; 6:45 PM), "
-     "every day. Adjust timezone settings in OpenClaw Desktop as needed.")
+body("This means: at the top of the hour, every 6 hours (midnight, 6 AM, noon, 6 PM), "
+     "every day. This schedule allows up to 9 retries over 48 hours for pending transcripts.")
 spacer(0.1)
 note("The script is idempotent. Once a video is processed, subsequent runs "
      "for the same video exit immediately with 'already processed'. There is "
      "no penalty for running it frequently.")
 
-sub("11.4 What Happens on Reboot")
+sub("12.4 What Happens on Reboot")
 bullet("Scheduled tasks are <b>persistent</b> &mdash; stored on disk, survive restarts")
 bullet("When the Desktop app starts, it auto-resumes all scheduled tasks")
 bullet("It catches up the <b>most recent missed run</b> (checks last 7 days)")
 bullet("Older missed runs are discarded (no queue of 50+ runs after long outage)")
 bullet("A notification appears when a catch-up run starts")
 
-sub("11.5 Requirements for Scheduled Tasks to Run")
+sub("12.5 Requirements for Scheduled Tasks to Run")
 bullet("OpenClaw Desktop app must be <b>running</b>")
 bullet("Computer must be <b>awake</b> (not sleeping/hibernating)")
 bullet("Consider enabling 'Keep computer awake' in OpenClaw Desktop settings")
@@ -765,12 +848,12 @@ bullet("Internet connection must be available")
 story.append(PageBreak())
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 12. LOG FILE
+# 13. LOG FILE
 # ═══════════════════════════════════════════════════════════════════════════
-section("12. Log File &amp; Housekeeping")
+section("13. Log File &amp; Housekeeping")
 story.append(HR())
 
-sub("12.1 Log File")
+sub("13.1 Log File")
 body("Location: C:\\Users\\&lt;USERNAME&gt;\\AppData\\Roaming\\YTDigest\\ytdigest.log")
 body("Format: [YYYY-MM-DD HH:MM:SS] message")
 body("The log captures every action: RSS fetch, video classification, transcript "
@@ -781,7 +864,7 @@ body("Example log entries:")
 code("[2026-03-12 09:15:00] ============================================================\n"
      "[2026-03-12 09:15:00] YT Digest run started.\n"
      "[2026-03-12 09:15:00] Fetching RSS feed for channel: UCZk3...\n"
-     "[2026-03-12 09:15:01] Eligible videos: 2 (skipped 8 shorts, 3 too short, 0 too long)\n"
+     "[2026-03-12 09:15:01] Eligible videos: 2 (skipped 8 shorts, 3 too short, 0 members-only)\n"
      "[2026-03-12 09:15:01] Checking: \"Deep Dive into Transformers\" (abc123)\n"
      "[2026-03-12 09:15:01] Fetching transcript for video: abc123\n"
      "[2026-03-12 09:15:02] Transcript retrieved: 24523 characters\n"
@@ -792,7 +875,7 @@ code("[2026-03-12 09:15:00] ====================================================
      "[2026-03-12 09:23:28] Done. Processed: 1, Skipped: 1, Total checked: 2.\n"
      "[2026-03-12 09:23:28] YT Digest run complete.")
 
-sub("12.2 Log Rotation")
+sub("13.2 Log Rotation")
 body("The log file is trimmed to the last 500 lines at the start of each run "
      "(configurable via max_log_lines in config.ini). This prevents unbounded "
      "growth while keeping enough history for debugging.")
@@ -800,64 +883,66 @@ body("The log file is trimmed to the last 500 lines at the start of each run "
 story.append(PageBreak())
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 13. TROUBLESHOOTING
+# 14. TROUBLESHOOTING
 # ═══════════════════════════════════════════════════════════════════════════
-section("13. Troubleshooting")
+section("14. Troubleshooting")
 story.append(HR())
 
-sub("13.1 Script Won't Run &mdash; ModuleNotFoundError")
+sub("14.1 Script Won't Run &mdash; ModuleNotFoundError")
 body("The built-in dependency checker should handle this automatically. If it fails:")
 code("pip install -r %APPDATA%\\YTDigest\\requirements_ytdigest.txt")
 note("Make sure you're using the same Python that OpenClaw uses. Check with: python --version")
 
-sub("13.2 'Please set youtube_channel_id / gemini_api_key in config.ini'")
+sub("14.2 'Please set youtube_channel_id / gemini_api_key in config.ini'")
 body("Edit the config file and replace the placeholder values:")
 code("notepad \"%APPDATA%\\YTDigest\\config.ini\"")
 
-sub("13.3 'No Videos Found in RSS Feed'")
+sub("14.3 'No Videos Found in RSS Feed'")
 bullet("Verify the channel ID is correct in config.ini")
 bullet("Check internet connectivity")
 bullet("YouTube may be temporarily down or rate-limiting")
 bullet("Try opening the feed URL in a browser")
 
-sub("13.4 'Transcript Not Yet Available'")
+sub("14.4 'Transcript Not Yet Available'")
 body("This is <b>normal</b> for recently uploaded videos. YouTube takes time to "
-     "generate auto-captions (typically 15 minutes to several hours). The script "
-     "will try again on the next cron run.")
+     "generate auto-captions (typically 15 minutes to several hours). The video "
+     "will be marked as <b>pending_transcript</b> and retried automatically every "
+     "6 hours for up to 48 hours (9 attempts). After that, it becomes "
+     "<b>no_transcript</b> and you can use --summarize to manually import one.")
 
-sub("13.5 'Gemini Analysis Failed'")
+sub("14.5 'Gemini Analysis Failed'")
 bullet("Check that gemini_api_key is valid and not expired in config.ini")
 bullet("Check Gemini API quotas at aistudio.google.com")
 bullet("The model name may have changed &mdash; verify gemini_model is current")
 bullet("Network issues can cause timeouts &mdash; the next run will retry")
 
-sub("13.6 Scheduled Task Not Firing")
+sub("14.6 Scheduled Task Not Firing")
 bullet("Is OpenClaw Desktop app running?")
 bullet("Is the computer awake (not sleeping)?")
 bullet("Check the task is enabled in the Desktop app's schedule settings")
 bullet("Review ~/.claude/scheduled-tasks/yt-digest/SKILL.md exists")
 
-sub("13.7 Database Locked Error")
+sub("14.7 Database Locked Error")
 body("SQLite can only handle one writer at a time. If two runs overlap:")
-bullet("This shouldn't happen with cron spacing of 15 minutes")
-bullet("If it does, the script will fail and retry on the next run")
+bullet("The instance lock should prevent this (PID-based lock file)")
+bullet("If it does happen, the script will fail and retry on the next run")
 bullet("Check for orphaned Python processes: tasklist | findstr python")
 
-sub("13.8 Resetting the Database")
+sub("14.8 Resetting the Database")
 body("To start fresh (reprocess all videos from the last 3 days):")
 code("del \"%APPDATA%\\YTDigest\\ytdigest.db\"")
 body("The script will create a new database on the next run.")
 
-sub("13.9 Resetting the Rate Limiter")
+sub("14.9 Resetting the Rate Limiter")
 body("If the rate limiter is blocking and you want to force an immediate run:")
 code("del \"%APPDATA%\\YTDigest\\last_api_call.txt\"")
 
 story.append(PageBreak())
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 14. QUICK REFERENCE
+# 15. QUICK REFERENCE
 # ═══════════════════════════════════════════════════════════════════════════
-section("14. Quick Reference Card")
+section("15. Quick Reference Card")
 story.append(HR())
 
 sub("File Locations")
@@ -873,13 +958,18 @@ code("App Directory:  %APPDATA%\\YTDigest\\\n"
 sub("Key Commands")
 code("# Run manually\n"
      "python %APPDATA%\\YTDigest\\yt_digest.py\n\n"
+     "# Manually summarize a video with your own transcript\n"
+     "python yt_digest.py --summarize VIDEO_ID transcript.txt\n\n"
      "# Install dependencies\n"
      "pip install -r %APPDATA%\\YTDigest\\requirements_ytdigest.txt\n\n"
      "# Edit configuration\n"
      "notepad \"%APPDATA%\\YTDigest\\config.ini\"\n\n"
      "# Query the database\n"
      "sqlite3 \"%APPDATA%\\YTDigest\\ytdigest.db\" \\\n"
-     "  \"SELECT title, processed_at FROM processed_videos;\"\n\n"
+     "  \"SELECT title, status, processed_at FROM processed_videos;\"\n\n"
+     "# Check pending retries\n"
+     "sqlite3 \"%APPDATA%\\YTDigest\\ytdigest.db\" \\\n"
+     "  \"SELECT video_id, title, retry_count FROM processed_videos WHERE status='pending_transcript';\"\n\n"
      "# Reset (delete database to reprocess all)\n"
      "del \"%APPDATA%\\YTDigest\\ytdigest.db\"\n\n"
      "# Check log\n"
@@ -893,15 +983,15 @@ code("Config File:     %APPDATA%\\YTDigest\\config.ini\n"
      "Rate Limit:      10 min between API calls\n"
      "Lookback:        3 days\n"
      "Min Duration:    30 minutes\n"
-     "Max Duration:    3 hours\n"
-     "Cron Schedule:   Every 15 min, 6 AM - 7 PM ET")
+     "Max Duration:    None (no upper limit)\n"
+     "Cron Schedule:   Every 6 hours (0 */6 * * *)")
 
 sub("Video Filtering Summary")
 code("SKIP:  YouTube Shorts (hq2.jpg thumbnail or /shorts/ URL)\n"
      "SKIP:  Videos under 60 seconds (detected Shorts)\n"
      "SKIP:  Videos under 30 minutes (too short)\n"
-     "SKIP:  Videos over 3 hours (too long)\n"
-     "KEEP:  Videos between 30 min and 3 hours")
+     "SKIP:  Members-only (title pattern match)\n"
+     "KEEP:  Videos 30 min and up (no upper limit)")
 
 spacer(0.5)
 story.append(HR())

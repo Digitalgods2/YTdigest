@@ -11,6 +11,8 @@ YT Digest is a Python script that monitors a YouTube channel, fetches transcript
 - **Self-Installing** — On first run, copies itself into `%APPDATA%\YTDigest` so everything lives in one place
 - **Transcript Retrieval** — Fetches auto-generated or manual transcripts via YouTube's API
 - **AI-Powered Highlights** — Sends transcripts to Google Gemini 2.5 Flash for top-5 highlights
+- **Transcript Retry** — Videos without transcripts are retried over 48 hours (9 attempts at 6-hour intervals) before giving up
+- **Manual Summary** — Import a Whisper (or other) transcript via `--summarize` to generate highlights for videos with no auto-transcript
 - **SQLite Storage** — Stores titles, dates, transcripts, and summaries permanently
 - **Rate Limiting** — 10-minute minimum between API calls, tracked persistently on disk
 - **3-Day Lookback** — On first run (or after outage), catches up on recent videos chronologically
@@ -61,7 +63,7 @@ yt-dlp --print channel_id --playlist-items 1 "https://www.youtube.com/@ChannelHa
 
 ### 3. Schedule (optional)
 
-Set up as a scheduled task in OpenClaw (Clawdbot) with cron: `*/15 6-18 * * *`
+Set up as a scheduled task in OpenClaw (Clawdbot) with cron: `0 */6 * * *`
 
 ```
 Run the command: python "%APPDATA%\YTDigest\yt_digest.py"
@@ -87,8 +89,28 @@ Run the command: python "%APPDATA%\YTDigest\yt_digest.py"
 | `title` | TEXT | Video title |
 | `published` | DATETIME | Original publish date (ISO 8601) |
 | `processed_at` | DATETIME | When YT Digest processed it |
+| `status` | TEXT | `done`, `pending_transcript`, or `no_transcript` |
 | `summary` | TEXT | Gemini's top 5 highlights |
 | `transcript` | TEXT | Full transcript with timestamps |
+| `retry_count` | INTEGER | Number of transcript fetch attempts |
+
+### Video Statuses
+
+| Status | Meaning |
+|---|---|
+| `done` | Transcript fetched and Gemini highlights generated |
+| `pending_transcript` | No transcript yet — will retry automatically every 6 hours |
+| `no_transcript` | Gave up after 9 attempts (~48 hours) — use `--summarize` for manual import |
+
+## Manual Summary (--summarize)
+
+If a video ends up as `no_transcript`, you can provide your own transcript (e.g. from Whisper) and generate highlights:
+
+```bash
+python yt_digest.py --summarize VIDEO_ID path/to/transcript.txt
+```
+
+This imports the transcript, sends it to Gemini for analysis, and marks the video as `done`.
 
 ## Video Filtering
 

@@ -330,7 +330,8 @@ def init_db() -> sqlite3.Connection:
             processed_at DATETIME,
             status       TEXT DEFAULT 'done',
             summary      TEXT,
-            transcript   TEXT
+            transcript   TEXT,
+            retry_count  INTEGER DEFAULT 0
         )
     """)
     conn.commit()
@@ -344,17 +345,22 @@ def init_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE processed_videos ADD COLUMN summary TEXT")
     if "status" not in columns:
         conn.execute("ALTER TABLE processed_videos ADD COLUMN status TEXT DEFAULT 'done'")
+    if "retry_count" not in columns:
+        conn.execute("ALTER TABLE processed_videos ADD COLUMN retry_count INTEGER DEFAULT 0")
     conn.commit()
 
     return conn
 
 
 def is_processed(conn: sqlite3.Connection, video_id: str) -> bool:
-    """Check if a video has already been processed."""
+    """Check if a video has already been fully processed or permanently skipped."""
     row = conn.execute(
-        "SELECT 1 FROM processed_videos WHERE video_id = ?", (video_id,)
+        "SELECT status FROM processed_videos WHERE video_id = ?", (video_id,)
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    # pending_transcript videos should be retried
+    return row[0] != "pending_transcript"
 
 
 def mark_processed(conn: sqlite3.Connection, video_id: str, title: str,
@@ -370,15 +376,46 @@ def mark_processed(conn: sqlite3.Connection, video_id: str, title: str,
     conn.commit()
 
 
-def mark_skipped(conn: sqlite3.Connection, video_id: str, title: str,
-                 published: str, reason: str):
-    """Record a video as skipped so it won't be retried on future runs."""
-    conn.execute(
-        """INSERT OR IGNORE INTO processed_videos
-           (video_id, title, published, processed_at, status)
-           VALUES (?, ?, ?, ?, ?)""",
-        (video_id, title, published, datetime.now().isoformat(), reason),
-    )
+MAX_TRANSCRIPT_RETRIES = 9  # Give up after 9 attempts (~48h at 6-hour intervals)
+
+
+def mark_pending_transcript(conn: sqlite3.Connection, video_id: str,
+                            title: str, published: str):
+    """Record a video as pending transcript, or increment retry count.
+    After MAX_TRANSCRIPT_RETRIES attempts, flips status to no_transcript."""
+    row = conn.execute(
+        "SELECT retry_count FROM processed_videos WHERE video_id = ?",
+        (video_id,)
+    ).fetchone()
+
+    if row is None:
+        # First attempt — create pending record
+        conn.execute(
+            """INSERT INTO processed_videos
+               (video_id, title, published, processed_at, status, retry_count)
+               VALUES (?, ?, ?, ?, 'pending_transcript', 1)""",
+            (video_id, title, published, datetime.now().isoformat()),
+        )
+        log(f"Marked as pending_transcript (attempt 1/{MAX_TRANSCRIPT_RETRIES}).")
+    else:
+        new_count = row[0] + 1
+        if new_count >= MAX_TRANSCRIPT_RETRIES:
+            conn.execute(
+                """UPDATE processed_videos
+                   SET status = 'no_transcript', retry_count = ?,
+                       processed_at = ?
+                   WHERE video_id = ?""",
+                (new_count, datetime.now().isoformat(), video_id),
+            )
+            log(f"Gave up after {new_count} attempts. Marked as no_transcript.")
+        else:
+            conn.execute(
+                """UPDATE processed_videos
+                   SET retry_count = ?, processed_at = ?
+                   WHERE video_id = ?""",
+                (new_count, datetime.now().isoformat(), video_id),
+            )
+            log(f"Still pending_transcript (attempt {new_count}/{MAX_TRANSCRIPT_RETRIES}).")
     conn.commit()
 
 
@@ -771,9 +808,9 @@ def process_single_video(conn: sqlite3.Connection, video: dict) -> bool:
     record_api_call_time()
 
     if not transcript:
-        log(f"Transcript not available for \"{video['title']}\". Marking as no_transcript.")
-        mark_skipped(conn, video_id, video["title"],
-                     video["published"], "no_transcript")
+        log(f"Transcript not available for \"{video['title']}\".")
+        mark_pending_transcript(conn, video_id, video["title"],
+                                video["published"])
         return False
 
     log(f"Transcript retrieved: {len(transcript)} characters")
@@ -827,7 +864,51 @@ def release_lock():
         pass
 
 
+def manual_summarize(video_id: str, transcript_path: str):
+    """Import a manual summary (e.g. from Whisper), run Gemini, and mark done."""
+    init_dirs()
+    transcript_file = Path(transcript_path)
+    if not transcript_file.exists():
+        print(f"[ERROR] File not found: {transcript_path}")
+        sys.exit(1)
+
+    transcript = transcript_file.read_text(encoding="utf-8").strip()
+    if not transcript:
+        print(f"[ERROR] Transcript file is empty: {transcript_path}")
+        sys.exit(1)
+
+    conn = init_db()
+    try:
+        # Look up existing record for title/published, or use defaults
+        row = conn.execute(
+            "SELECT title, published FROM processed_videos WHERE video_id = ?",
+            (video_id,)
+        ).fetchone()
+        title = row[0] if row else video_id
+        published = row[1] if row else datetime.now().isoformat()
+
+        log(f"Manual summary for \"{title}\" ({len(transcript)} characters)")
+
+        # Analyze with Gemini
+        enforce_rate_limit()
+        highlights = analyze_with_gemini(transcript, title)
+        record_api_call_time()
+
+        mark_processed(conn, video_id, title, published, highlights, transcript)
+        log(f"Successfully processed manual summary: \"{title}\"")
+    except Exception as e:
+        log(f"Manual transcribe failed: {e}")
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
 def main():
+    # Handle --summarize VIDEO_ID path/to/transcript.txt
+    if len(sys.argv) >= 4 and sys.argv[1] == "--summarize":
+        manual_summarize(sys.argv[2], sys.argv[3])
+        return
+
     init_dirs()
 
     if not acquire_lock():
@@ -859,7 +940,17 @@ def _main():
         # Get videos from the last LOOKBACK_DAYS days
         videos = get_recent_videos()
         if not videos:
-            log("No recent videos found. Exiting.")
+            log("No new videos found.")
+
+        # Count pending transcripts for visibility
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM processed_videos WHERE status = 'pending_transcript'"
+        ).fetchone()[0]
+        if pending:
+            log(f"Pending transcript retries: {pending}")
+
+        if not videos and not pending:
+            log("Nothing to process. Exiting.")
             return
 
         processed = 0
