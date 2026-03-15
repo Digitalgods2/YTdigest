@@ -7,7 +7,7 @@ YT Digest is a Python script that monitors a YouTube channel, fetches transcript
 ## Features
 
 - **RSS Feed Monitoring** — Polls a YouTube channel's RSS feed for recent videos
-- **Smart Video Filtering** — Skips Shorts and clips under 30 min; no upper duration limit
+- **Smart Video Filtering** — Skips Shorts, clips under 30 min, and members-only videos; no upper duration limit
 - **Self-Installing** — On first run, copies itself into `%APPDATA%\YTDigest` so everything lives in one place
 - **Transcript Retrieval** — Fetches auto-generated or manual transcripts via YouTube's API
 - **AI-Powered Highlights** — Sends transcripts to Google Gemini 2.5 Flash for top-5 highlights
@@ -102,6 +102,7 @@ Videos are classified through a multi-step pipeline:
 |---|---|
 | Skip | Shorts (any detection method) |
 | Skip | Under 30 minutes |
+| Skip | Members-only (title contains `[member access]` or `[members only]`) |
 | Process | 30 minutes and up (no upper limit) |
 
 ## Dependencies
@@ -111,7 +112,7 @@ Videos are classified through a multi-step pipeline:
 | `feedparser` | 6.0.0 | RSS feed parsing |
 | `requests` | 2.25.0 | HTTP requests for duration detection |
 | `youtube-transcript-api` | 1.2.0 | Transcript fetching |
-| `google-generativeai` | 0.8.0 | Gemini API SDK |
+| `google-genai` | 1.0.0 | Gemini API SDK |
 
 ## Documentation
 

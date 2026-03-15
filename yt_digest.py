@@ -28,7 +28,7 @@ REQUIRED_PACKAGES = {
     "feedparser":             ("feedparser",             "6.0.0"),
     "requests":               ("requests",               "2.25.0"),
     "youtube-transcript-api": ("youtube_transcript_api", "1.2.0"),
-    "google-generativeai":    ("google.generativeai",    "0.8.0"),
+    "google-genai":           ("google.genai",           "1.0.0"),
 }
 
 
@@ -167,7 +167,7 @@ import re
 import feedparser
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi
-import google.generativeai as genai
+from google import genai
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 APP_DIR = Path(os.environ.get("APPDATA", "")) / "YTDigest"
@@ -656,8 +656,7 @@ def fetch_transcript(video_id: str) -> str | None:
 def analyze_with_gemini(transcript: str, title: str) -> str:
     """Send the transcript to Gemini and get 3-5 key highlights."""
     log("Sending transcript to Gemini for analysis...")
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     prompt = (
         "You are an expert content analyst. Given the following YouTube video "
@@ -679,7 +678,10 @@ def analyze_with_gemini(transcript: str, title: str) -> str:
         "Return the 5 highlights now:"
     )
 
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+    )
     return response.text
 
 
